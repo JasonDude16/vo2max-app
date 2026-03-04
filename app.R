@@ -77,7 +77,8 @@ ui <- fluidPage(
           "Rockport Walk Test" = "rockport",
           "1.5 Mile Run Test"  = "run15",
           "Queen's Step Test"  = "queens",
-          "6-Minute Walk Test" = "walk6"
+          "6-Minute Walk Test" = "walk6",
+          "Measured VO2- Bruce Protocol" = "measured_bruce"
         )
       ),
       uiOutput("test_specific_inputs"),
@@ -90,7 +91,8 @@ ui <- fluidPage(
                  tags$li("Participant ID must be exactly 3 letters (case-insensitive)."),
                  tags$li("Enter time as minutes + seconds (seconds 0–59) where applicable."),
                  tags$li("Rockport weight is in pounds; converted to kg automatically (valid range 80–300 lb)."),
-                 tags$li("6MWT distance is in feet (valid range 500–3000 ft); converted to meters automatically. RPE scale 6–20.")
+                 tags$li("6MWT distance is in feet (valid range 500–3000 ft); converted to meters automatically. RPE scale 6–20."),
+                 tags$li("Measured VO2 (Bruce) requires VO2max, RER, peak HR, and yes/no flags for VO2max achieved and VO2 plateau.")
                )
       )
     ),
@@ -106,7 +108,7 @@ ui <- fluidPage(
           
           div(class = "card",
               h3("Tests included in this app"),
-              p("This app estimates VO₂max using four field tests. Enter the required values on the left, then submit to compute and compare results."),
+              p("This app estimates VO₂max using four field tests plus a measured option. Enter the required values on the left, then submit to compute and compare results."),
               
               h4("1) Rockport Walk Test"),
               tags$ul(
@@ -132,6 +134,13 @@ ui <- fluidPage(
                 tags$li("Walk as far as possible in 6 minutes; record total distance."),
                 tags$li("Inputs: distance (feet), RPE (6–20 scale)."),
                 tags$li("Backend converts distance → meters.")
+              ),
+              
+              h4("5) Measured VO2- Bruce Protocol"),
+              tags$ul(
+                tags$li("Measured VO2max from a metabolic cart during a Bruce treadmill test."),
+                tags$li("Inputs: VO2max, RER, peak HR, VO2max achieved (Yes/No), VO2 plateau (Yes/No)."),
+                tags$li("VO2max value is stored directly as the VO₂ result.")
               )
           )
         ),
@@ -195,19 +204,22 @@ server <- function(input, output, session) {
   
   # In-memory store (no timestamp)
   base_df <- data.frame(
-    id           = integer(),
-    participant  = character(),
-    test_type    = character(),   # rockport | run15 | queens | walk6
-    sex_label    = character(),
-    age          = numeric(),
-    weight_lb    = numeric(),
-    weight_kg    = numeric(),
-    time_min     = numeric(),
-    hr_bpm       = numeric(),
-    distance_ft  = numeric(),     # 6MWT input
-    distance_m   = numeric(),     # 6MWT derived
-    rpe          = numeric(),     # 6MWT input
-    vo2          = numeric(),
+    id             = integer(),
+    participant    = character(),
+    test_type      = character(),   # rockport | run15 | queens | walk6 | measured_bruce
+    sex_label      = character(),
+    age            = numeric(),
+    weight_lb      = numeric(),
+    weight_kg      = numeric(),
+    time_min       = numeric(),
+    hr_bpm         = numeric(),
+    distance_ft    = numeric(),     # 6MWT input
+    distance_m     = numeric(),     # 6MWT derived
+    rpe            = numeric(),     # 6MWT input
+    rer            = numeric(),     # measured VO2 (Bruce)
+    vo2max_achieved = character(),  # measured VO2 (Bruce)
+    vo2_plateau     = character(),  # measured VO2 (Bruce)
+    vo2            = numeric(),
     stringsAsFactors = FALSE
   )
   store <- reactiveValues(data = base_df)
@@ -240,6 +252,21 @@ server <- function(input, output, session) {
       "walk6" = tagList(
         numericInput("dist_ft", "Distance (feet)", value = NA, min = 500, max = 3000, step = 1),
         sliderInput("rpe6", "RPE (6–20)", min = 6, max = 20, value = 12, step = 1)
+      ),
+      "measured_bruce" = tagList(
+        numericInput("vo2_meas", "VO2max (ml·kg⁻¹·min⁻¹)", value = NA, min = 5, max = 100, step = 0.1),
+        numericInput("rer_meas", "RER (VCO₂/VO₂)", value = NA, min = 0.5, max = 2.5, step = 0.01),
+        numericInput("hr_meas", "Peak Heart Rate (bpm)", value = NA, min = 60, max = 220, step = 1),
+        radioButtons(
+          "vo2max_achieved_meas", "VO2max achieved?",
+          choices = c("Yes" = "Yes", "No" = "No"),
+          inline = TRUE
+        ),
+        radioButtons(
+          "vo2_plateau_meas", "VO2 plateau?",
+          choices = c("Yes" = "Yes", "No" = "No"),
+          inline = TRUE
+        )
       )
     )
   })
@@ -254,7 +281,7 @@ server <- function(input, output, session) {
     }
     pid <- toupper(pid_raw)
     
-    validate(need(input$test_type %in% c("rockport","run15","queens","walk6"), "Choose a test."))
+    validate(need(input$test_type %in% c("rockport","run15","queens","walk6","measured_bruce"), "Choose a test."))
     
     if (input$test_type == "rockport") {
       req(input$mass_lb, input$age, input$sex_rc, input$time_rc_min, input$time_rc_sec, input$hr_rc)
@@ -276,19 +303,22 @@ server <- function(input, output, session) {
       time_min <- minsec_to_minutes(input$time_rc_min, input$time_rc_sec)
       vo2      <- vo2_rockport(mass_kg, input$age, as.numeric(input$sex_rc), time_min, input$hr_rc)
       rec <- data.frame(
-        id          = next_id(),
-        participant = pid,
-        test_type   = "rockport",
-        sex_label   = ifelse(as.numeric(input$sex_rc) == 1, "Male (1)", "Female (0)"),
-        age         = as.numeric(input$age),
-        weight_lb   = as.numeric(input$mass_lb),
-        weight_kg   = mass_kg,
-        time_min    = time_min,
-        hr_bpm      = as.numeric(input$hr_rc),
-        distance_ft = NA_real_,
-        distance_m  = NA_real_,
-        rpe         = NA_real_,
-        vo2         = vo2
+        id              = next_id(),
+        participant     = pid,
+        test_type       = "rockport",
+        sex_label       = ifelse(as.numeric(input$sex_rc) == 1, "Male (1)", "Female (0)"),
+        age             = as.numeric(input$age),
+        weight_lb       = as.numeric(input$mass_lb),
+        weight_kg       = mass_kg,
+        time_min        = time_min,
+        hr_bpm          = as.numeric(input$hr_rc),
+        distance_ft     = NA_real_,
+        distance_m      = NA_real_,
+        rpe             = NA_real_,
+        rer             = NA_real_,
+        vo2max_achieved = NA_character_,
+        vo2_plateau     = NA_character_,
+        vo2             = vo2
       )
       
     } else if (input$test_type == "run15") {
@@ -303,19 +333,22 @@ server <- function(input, output, session) {
       }
       vo2 <- vo2_1_5_mile(time_min)
       rec <- data.frame(
-        id          = next_id(),
-        participant = pid,
-        test_type   = "run15",
-        sex_label   = "",
-        age         = NA_real_,
-        weight_lb   = NA_real_,
-        weight_kg   = NA_real_,
-        time_min    = time_min,
-        hr_bpm      = NA_real_,
-        distance_ft = NA_real_,
-        distance_m  = NA_real_,
-        rpe         = NA_real_,
-        vo2         = vo2
+        id              = next_id(),
+        participant     = pid,
+        test_type       = "run15",
+        sex_label       = "",
+        age             = NA_real_,
+        weight_lb       = NA_real_,
+        weight_kg       = NA_real_,
+        time_min        = time_min,
+        hr_bpm          = NA_real_,
+        distance_ft     = NA_real_,
+        distance_m      = NA_real_,
+        rpe             = NA_real_,
+        rer             = NA_real_,
+        vo2max_achieved = NA_character_,
+        vo2_plateau     = NA_character_,
+        vo2             = vo2
       )
       
     } else if (input$test_type == "queens") {
@@ -325,22 +358,59 @@ server <- function(input, output, session) {
       }
       vo2 <- if (input$sex_q == "Male") vo2_queens_men(input$hr_q) else vo2_queens_women(input$hr_q)
       rec <- data.frame(
-        id          = next_id(),
-        participant = pid,
-        test_type   = "queens",
-        sex_label   = input$sex_q,
-        age         = NA_real_,
-        weight_lb   = NA_real_,
-        weight_kg   = NA_real_,
-        time_min    = NA_real_,
-        hr_bpm      = as.numeric(input$hr_q),
-        distance_ft = NA_real_,
-        distance_m  = NA_real_,
-        rpe         = NA_real_,
-        vo2         = vo2
+        id              = next_id(),
+        participant     = pid,
+        test_type       = "queens",
+        sex_label       = input$sex_q,
+        age             = NA_real_,
+        weight_lb       = NA_real_,
+        weight_kg       = NA_real_,
+        time_min        = NA_real_,
+        hr_bpm          = as.numeric(input$hr_q),
+        distance_ft     = NA_real_,
+        distance_m      = NA_real_,
+        rpe             = NA_real_,
+        rer             = NA_real_,
+        vo2max_achieved = NA_character_,
+        vo2_plateau     = NA_character_,
+        vo2             = vo2
       )
       
-    } else { # walk6
+    } else if (input$test_type == "measured_bruce") {
+      req(input$vo2_meas, input$rer_meas, input$hr_meas, input$vo2max_achieved_meas, input$vo2_plateau_meas)
+      
+      if (!is.finite(input$vo2_meas) || input$vo2_meas < 5 || input$vo2_meas > 100) {
+        showNotification("VO2max must be between 5 and 100 ml·kg⁻¹·min⁻¹.", type = "error"); return()
+      }
+      if (!is.finite(input$rer_meas) || input$rer_meas < 0.5 || input$rer_meas > 2.5) {
+        showNotification("RER must be between 0.50 and 2.50.", type = "error"); return()
+      }
+      if (!is.finite(input$hr_meas) || input$hr_meas < 60 || input$hr_meas > 220) {
+        showNotification("Peak HR must be between 60 and 220 bpm.", type = "error"); return()
+      }
+      
+      vo2 <- as.numeric(input$vo2_meas)
+      
+      rec <- data.frame(
+        id              = next_id(),
+        participant     = pid,
+        test_type       = "measured_bruce",
+        sex_label       = "",
+        age             = NA_real_,
+        weight_lb       = NA_real_,
+        weight_kg       = NA_real_,
+        time_min        = NA_real_,
+        hr_bpm          = as.numeric(input$hr_meas),
+        distance_ft     = NA_real_,
+        distance_m      = NA_real_,
+        rpe             = NA_real_,
+        rer             = as.numeric(input$rer_meas),
+        vo2max_achieved = as.character(input$vo2max_achieved_meas),
+        vo2_plateau     = as.character(input$vo2_plateau_meas),
+        vo2             = vo2
+      )
+      
+    } else if (input$test_type == "walk6") {
       req(input$dist_ft, input$rpe6)
       if (!is.finite(input$dist_ft) || input$dist_ft < 500 || input$dist_ft > 3000) {
         showNotification("6MWT distance must be between 500 and 3000 feet.", type = "error"); return()
@@ -351,20 +421,25 @@ server <- function(input, output, session) {
       dist_m <- ft_to_m(as.numeric(input$dist_ft))
       vo2    <- vo2_6mwt(dist_m, as.numeric(input$rpe6))
       rec <- data.frame(
-        id          = next_id(),
-        participant = pid,
-        test_type   = "walk6",
-        sex_label   = "",
-        age         = NA_real_,
-        weight_lb   = NA_real_,
-        weight_kg   = NA_real_,
-        time_min    = NA_real_,
-        hr_bpm      = NA_real_,
-        distance_ft = as.numeric(input$dist_ft),
-        distance_m  = dist_m,
-        rpe         = as.numeric(input$rpe6),
-        vo2         = vo2
+        id              = next_id(),
+        participant     = pid,
+        test_type       = "walk6",
+        sex_label       = "",
+        age             = NA_real_,
+        weight_lb       = NA_real_,
+        weight_kg       = NA_real_,
+        time_min        = NA_real_,
+        hr_bpm          = NA_real_,
+        distance_ft     = as.numeric(input$dist_ft),
+        distance_m      = dist_m,
+        rpe             = as.numeric(input$rpe6),
+        rer             = NA_real_,
+        vo2max_achieved = NA_character_,
+        vo2_plateau     = NA_character_,
+        vo2             = vo2
       )
+    } else {
+      showNotification("Unknown test type.", type = "error"); return()
     }
     
     store$data <- rbind(store$data, rec)
@@ -395,6 +470,9 @@ server <- function(input, output, session) {
         sprintf("1.5 Mile Run — time=%0.2f min", lr$time_min)
       } else if (tt == "queens") {
         sprintf("Queen's Step — sex=%s | HR=%s bpm", lr$sex_label, lr$hr_bpm)
+      } else if (tt == "measured_bruce") {
+        sprintf("Measured VO2 (Bruce) — VO2max=%0.1f | RER=%0.2f | HR=%s bpm | VO2max achieved=%s | VO2 plateau=%s",
+                lr$vo2, lr$rer, lr$hr_bpm, lr$vo2max_achieved, lr$vo2_plateau)
       } else {
         sprintf("6-Min Walk — distance=%0.0f ft (%0.1f m) | RPE=%s",
                 lr$distance_ft, lr$distance_m, lr$rpe)
@@ -410,7 +488,8 @@ server <- function(input, output, session) {
     out <- store$data
     if (nrow(out) == 0) return(out)
     out <- out[order(out$participant, out$id, decreasing = TRUE), ]
-    out[, c("id","participant","test_type","sex_label","age","time_min","hr_bpm","distance_ft","rpe","vo2")]
+    out[, c("id","participant","test_type","sex_label","age","time_min","hr_bpm",
+            "distance_ft","rpe","rer","vo2max_achieved","vo2_plateau","vo2")]
   })
   
   output$data_table <- renderDT({
@@ -421,7 +500,7 @@ server <- function(input, output, session) {
       rownames  = FALSE,
       options   = list(pageLength = 10)
     )
-    dt %>% formatRound(columns = c("time_min","vo2"), digits = 1)
+    dt %>% formatRound(columns = c("time_min","rer","vo2"), digits = 1)
   })
   
   observeEvent(input$remove_rows, {
@@ -464,9 +543,9 @@ server <- function(input, output, session) {
     for (nm in setdiff(template, names(df))) df[[nm]] <- NA
     df <- df[, template, drop = FALSE]
     df$id <- suppressWarnings(as.integer(df$id))
-    char_cols <- c("participant","test_type","sex_label")
+    char_cols <- c("participant","test_type","sex_label","vo2max_achieved","vo2_plateau")
     for (nm in char_cols) df[[nm]] <- as.character(df[[nm]])
-    num_cols <- c("age","weight_lb","weight_kg","time_min","hr_bpm","distance_ft","distance_m","rpe","vo2")
+    num_cols <- c("age","weight_lb","weight_kg","time_min","hr_bpm","distance_ft","distance_m","rpe","rer","vo2")
     for (nm in num_cols) df[[nm]] <- suppressWarnings(as.numeric(df[[nm]]))
     # Uppercase 3-letter participant codes if present
     df$participant <- ifelse(grepl("^[A-Za-z]{3}$", df$participant), toupper(df$participant), df$participant)
